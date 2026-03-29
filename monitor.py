@@ -36,15 +36,15 @@ CONFIG = {
     "telegram_bot_token": os.environ.get("APPLE_MONITOR_TG_TOKEN", ""),
     "telegram_chat_id": os.environ.get("APPLE_MONITOR_TG_CHAT", ""),
 
-    # SKUs to monitor for in-store pickup (standard retail configs only)
+    # SKUs to monitor — 64GB+ models only (Mac Mini, Mac Studio, MacBook Pro)
     "skus": {
-        # Mac Mini M4 Pro — base config (only retail SKU in pickup system)
-        "MCX44ZP/A": "Mac Mini M4 Pro 24GB/512GB",
-        # Mac Studio M4 Max — standard configs
-        "MU963ZP/A": "Mac Studio M4 Max 14c/32c 36GB/512GB (base)",
-        "MHQH4ZP/A": "Mac Studio M4 Max 16c/40c 64GB/1TB",
-        # Mac Studio M3 Ultra
+        # ── Mac Studio (2025) — 64GB is a standard retail SKU ──
+        "MHQH4ZP/A": "Mac Studio M4 Max 64GB/1TB",
+        # ── Mac Studio M3 Ultra 96GB ──
         "MU973ZP/A": "Mac Studio M3 Ultra 96GB",
+        # ── MacBook Pro 16" M5 Max 48GB (closest retail to 64GB) ──
+        "MGE94ZP/A": "MBP 16\" M5 Max 48GB/2TB Silver",
+        "MGEE4ZP/A": "MBP 16\" M5 Max 48GB/2TB Black",
     },
 
     # CTO configs to monitor delivery estimates (no in-store pickup)
@@ -76,25 +76,18 @@ CONFIG = {
         },
     },
 
-    # Pages to monitor for changes (new product launches)
+    # Pages to monitor for changes (new product launches / refreshes)
     "watch_pages": [
-        {
-            "url": "https://www.apple.com/sg/shop/buy-mac/mac-mini",
-            "label": "Mac Mini Buy Page",
-        },
-        {
-            "url": "https://www.apple.com/sg/shop/buy-mac/mac-studio",
-            "label": "Mac Studio Buy Page",
-        },
-        {
-            "url": "https://www.apple.com/sg/mac-mini/",
-            "label": "Mac Mini Product Page",
-        },
-        {
-            "url": "https://www.apple.com/sg/mac-studio/",
-            "label": "Mac Studio Product Page",
-        },
+        {"url": "https://www.apple.com/sg/shop/buy-mac/mac-mini", "label": "Mac Mini Buy"},
+        {"url": "https://www.apple.com/sg/shop/buy-mac/mac-studio", "label": "Mac Studio Buy"},
+        {"url": "https://www.apple.com/sg/shop/buy-mac/macbook-pro", "label": "MacBook Pro Buy"},
+        {"url": "https://www.apple.com/sg/mac-mini/", "label": "Mac Mini Product"},
+        {"url": "https://www.apple.com/sg/mac-studio/", "label": "Mac Studio Product"},
+        {"url": "https://www.apple.com/sg/macbook-pro/", "label": "MacBook Pro Product"},
     ],
+
+    # Only notify if delivery is within this many days
+    "notify_within_days": 30,
 }
 
 STATE_DIR = Path(__file__).parent / ".state"
@@ -151,6 +144,27 @@ def telegram_send(text: str):
         log("  Telegram send failed")
 
 
+def _is_within_days(date_str: str, days: int) -> bool:
+    """Check if a delivery date string falls within N days from now.
+
+    Handles formats like 'Tue 31/03/2026', '07/05/2026 – 14/05/2026',
+    and '27/07/2026 – 11/08/2026'. Uses the earliest date found.
+    """
+    if not date_str:
+        return False
+    # Extract all DD/MM/YYYY patterns
+    dates = re.findall(r'(\d{2}/\d{2}/\d{4})', date_str)
+    if not dates:
+        # If no parseable date, assume it might be "today" style text
+        return True
+    try:
+        earliest = min(datetime.strptime(d, "%d/%m/%Y").replace(tzinfo=SGT) for d in dates)
+        now = datetime.now(SGT)
+        return (earliest - now).days <= days
+    except ValueError:
+        return True  # Can't parse — err on side of notifying
+
+
 def notify(title: str, message: str):
     log(f"  🔔 {title}: {message}")
     macos_notify(title, message)
@@ -160,9 +174,22 @@ def notify(title: str, message: str):
 # ── Pickup Availability Check ─────────────────────────────────────────
 
 def check_pickup():
+    """Check in-store pickup. Only alerts when status CHANGES to available."""
+    all_skus = list(CONFIG["skus"].keys())
+    pickup_state_file = STATE_DIR / "pickup_state.json"
+
+    prev_state = {}
+    if pickup_state_file.exists():
+        try:
+            prev_state = json.loads(pickup_state_file.read_text())
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    current_state = {}
+
     parts_query = "&".join(
         f"parts.{i}={sku.replace('/', '%2F')}"
-        for i, sku in enumerate(CONFIG["skus"].keys())
+        for i, sku in enumerate(all_skus)
     )
     url = (
         f"https://www.apple.com/{CONFIG['country']}/shop/retail/pickup-message"
@@ -171,38 +198,45 @@ def check_pickup():
 
     raw = _curl_fetch(url)
     if not raw:
-        log("  Pickup API returned empty response")
+        log("  Pickup API returned empty")
         return
 
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        log("  Pickup API returned non-JSON response")
+        log("  Pickup API non-JSON")
         return
 
     stores = data.get("body", {}).get("stores", [])
-    any_available = False
-
     for store in stores:
         store_name = store.get("storeName", "Unknown")
+        store_id = store.get("storeNumber", "?")
         parts = store.get("partsAvailability", {})
 
         for sku, info in parts.items():
             display = info.get("pickupDisplay", "")
-            quote_text = info.get("pickupSearchQuote", "Unknown")
+            pickup_quote = info.get("pickupSearchQuote", "")
             label = CONFIG["skus"].get(sku, sku)
+            state_key = f"{sku}@{store_id}"
+            current_state[state_key] = display
 
-            if display == "available":
-                any_available = True
+            was_available = prev_state.get(state_key) == "available"
+            is_available = display == "available"
+
+            if is_available and not was_available:
                 notify(
-                    "Apple Stock Available!",
-                    f"{label} available at {store_name}!\nSKU: {sku}"
+                    "64GB Mac Available for Pickup!",
+                    f"*Model:* {label}\n"
+                    f"*Store:* Apple {store_name}\n"
+                    f"*When:* {pickup_quote}\n"
+                    f"*SKU:* {sku}"
                 )
+            elif is_available:
+                log(f"  {store_name}: {label} — still available")
             else:
-                log(f"  {store_name}: {label} — {quote_text}")
+                log(f"  {store_name}: {label} — unavailable")
 
-    if not any_available:
-        log("  No pickup availability at any Singapore store")
+    pickup_state_file.write_text(json.dumps(current_state, indent=2))
 
 
 # ── CTO Delivery Estimate Check ──────────────────────────────────
@@ -279,13 +313,13 @@ def check_cto_delivery():
                 previous = {}
 
             prev_estimate = previous.get("estimate", "")
-            if current_estimate != prev_estimate:
+            if current_estimate != prev_estimate and _is_within_days(current_date, CONFIG["notify_within_days"]):
                 notify(
-                    "CTO Delivery Changed!",
-                    f"{label}\n"
-                    f"Was: {prev_estimate}\n"
-                    f"Now: {current_estimate}\n"
-                    f"Date: {current_date}"
+                    "64GB Mac CTO Delivery Update!",
+                    f"*Model:* {label}\n"
+                    f"*Delivery:* {current_estimate}\n"
+                    f"*Date:* {current_date}\n"
+                    f"*Previous:* {prev_estimate}"
                 )
             else:
                 log(f"  {label}: {msg_type} {current_estimate} ({current_date})")
@@ -303,62 +337,71 @@ def check_sku_delivery():
     if not skus:
         return
 
-    parts_query = "&".join(
-        f"parts.{i}={sku.replace('/', '%2F')}"
-        for i, sku in enumerate(skus.keys())
-    )
-    url = (
-        f"https://www.apple.com/{CONFIG['country']}/shop/delivery-message"
-        f"?{parts_query}"
-    )
+    all_skus = list(skus.keys())
+    batch_size = 10
 
-    raw = _curl_fetch(url)
-    if not raw:
-        log("  Delivery API returned empty response")
-        return
+    for batch_start in range(0, len(all_skus), batch_size):
+        batch = all_skus[batch_start:batch_start + batch_size]
+        parts_query = "&".join(
+            f"parts.{i}={sku.replace('/', '%2F')}"
+            for i, sku in enumerate(batch)
+        )
+        url = (
+            f"https://www.apple.com/{CONFIG['country']}/shop/delivery-message"
+            f"?{parts_query}"
+        )
 
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        log("  Delivery API returned non-JSON response")
-        return
-
-    delivery_msg = data.get("body", {}).get("content", {}).get("deliveryMessage", {})
-
-    for sku, label in skus.items():
-        info = delivery_msg.get(sku, {})
-        regular = info.get("regular", {})
-        if not regular:
-            log(f"  {label}: no delivery info")
+        raw = _curl_fetch(url)
+        if not raw:
+            log(f"  Delivery API empty (batch {batch_start // batch_size + 1})")
             continue
 
-        msg_type = regular.get("messageType", "")
-        opts = regular.get("deliveryOptionMessages", [])
-        estimate = opts[0].get("displayName", "") if opts else "unknown"
-        delivery_opts = regular.get("deliveryOptions", [])
-        date = delivery_opts[0].get("date", "") if delivery_opts else "unknown"
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            log(f"  Delivery API non-JSON (batch {batch_start // batch_size + 1})")
+            continue
 
-        state_file = STATE_DIR / f"delivery_{sku.replace('/', '_')}.json"
-        now = datetime.now().isoformat()
-        current_state = {"estimate": estimate, "date": date, "type": msg_type, "checked": now}
+        delivery_msg = data.get("body", {}).get("content", {}).get("deliveryMessage", {})
 
-        if state_file.exists():
-            try:
-                previous = json.loads(state_file.read_text())
-            except (json.JSONDecodeError, KeyError):
-                previous = {}
-            prev_estimate = previous.get("estimate", "")
-            if estimate != prev_estimate:
-                notify(
-                    "Delivery Estimate Changed!",
-                    f"{label}\nWas: {prev_estimate}\nNow: {estimate}\nDate: {date}"
-                )
+        for sku in batch:
+            label = skus[sku]
+            info = delivery_msg.get(sku, {})
+            regular = info.get("regular", {})
+            if not regular:
+                log(f"  {label}: no delivery info")
+                continue
+
+            msg_type = regular.get("messageType", "")
+            opts = regular.get("deliveryOptionMessages", [])
+            estimate = opts[0].get("displayName", "") if opts else "unknown"
+            delivery_opts = regular.get("deliveryOptions", [])
+            date = delivery_opts[0].get("date", "") if delivery_opts else "unknown"
+
+            state_file = STATE_DIR / f"delivery_{sku.replace('/', '_')}.json"
+            now = datetime.now(SGT).isoformat()
+            current_state = {"estimate": estimate, "date": date, "type": msg_type, "checked": now}
+
+            if state_file.exists():
+                try:
+                    previous = json.loads(state_file.read_text())
+                except (json.JSONDecodeError, KeyError):
+                    previous = {}
+                prev_estimate = previous.get("estimate", "")
+                if estimate != prev_estimate and _is_within_days(date, CONFIG["notify_within_days"]):
+                    notify(
+                        "64GB Mac Delivery Update!",
+                        f"*Model:* {label}\n"
+                        f"*Delivery:* {estimate}\n"
+                        f"*Date:* {date}\n"
+                        f"*Previous:* {prev_estimate}"
+                    )
+                else:
+                    log(f"  {label}: {estimate} ({date})")
             else:
-                log(f"  {label}: {msg_type} {estimate} ({date})")
-        else:
-            log(f"  {label}: baseline — {msg_type} {estimate} ({date})")
+                log(f"  {label}: baseline — {estimate} ({date})")
 
-        state_file.write_text(json.dumps(current_state, indent=2))
+            state_file.write_text(json.dumps(current_state, indent=2))
 
 
 # ── Page Change Detection ─────────────────────────────────────────────
@@ -418,9 +461,11 @@ def build_health_report() -> str:
     lines.append(f"Checks today: *{runs_today}*")
     lines.append("")
 
-    # Retail SKU delivery estimates
-    lines.append("*Retail SKU Delivery:*")
+    # High-RAM models (priority)
+    lines.append("*High-RAM Models (★):*")
     for sku, label in CONFIG["skus"].items():
+        if "★" not in label:
+            continue
         sf = STATE_DIR / f"delivery_{sku.replace('/', '_')}.json"
         if sf.exists():
             try:
@@ -448,8 +493,9 @@ def build_health_report() -> str:
 
     lines.append("")
 
-    # Pickup status
-    lines.append("*Pickup:* No availability (all stores)")
+    lines.append("")
+    total_skus = len(CONFIG["skus"])
+    lines.append(f"*Total SKUs tracked:* {total_skus}")
 
     # Page change status
     page_count = sum(1 for p in CONFIG["watch_pages"]
