@@ -1,0 +1,12 @@
+[2026-03-29T16:42:55.650Z] [warning] The ScriptProcessorNode is deprecated. Use AudioWorkletNode instead. (https://bit.ly/audio-worklet)
+[2026-03-29T16:42:55.650Z] [warning] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio
+[2026-03-29T16:42:58.204Z] [error] Failed to load resource: the server responded with a status of 541 ()
+[2026-03-29T16:43:26.698Z] [error] Access to fetch at 'https://www.apple.com/api-www/global-elements/global-header/v1/flyouts?locale=en_SG' from origin 'https://support.apple.com' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource.
+[2026-03-29T16:43:26.698Z] [error] Failed to load resource: net::ERR_FAILED
+[2026-03-29T16:43:26.940Z] [log] page show
+[2026-03-29T16:44:32.280Z] [log] page hide
+[2026-03-29T16:44:35.172Z] [error] Failed to load resource: the server responded with a status of 541 ()
+[2026-03-29T16:45:29.748Z] [error] Failed to load resource: the server responded with a status of 541 ()
+[2026-03-29T16:45:36.032Z] [error] Failed to load resource: the server responded with a status of 541 ()
+[2026-03-29T16:46:18.914Z] [error] Failed to load resource: the server responded with a status of 541 ()
+[2026-03-29T16:46:59.514Z] [error] Failed to load resource: the server responded with a status of 541 ()

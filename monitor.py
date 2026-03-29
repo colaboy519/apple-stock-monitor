@@ -19,9 +19,11 @@ import os
 import re
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
+
+SGT = timezone(timedelta(hours=8))
 
 # ── Configuration ──────────────────────────────────────────────────────
 
@@ -396,9 +398,166 @@ def check_page_changes():
             log(f"  {label}: baseline saved")
 
 
+# ── Health Report ─────────────────────────────────────────────────────
+
+def build_health_report() -> str:
+    """Build a health status message from current state files."""
+    now = datetime.now(SGT)
+    lines = [f"*Apple Stock Monitor*", f"_{now.strftime('%Y-%m-%d %H:%M SGT')}_", ""]
+
+    # Run counter
+    counter_file = STATE_DIR / "run_counter.json"
+    counter = {}
+    if counter_file.exists():
+        try:
+            counter = json.loads(counter_file.read_text())
+        except (json.JSONDecodeError, KeyError):
+            pass
+    today_key = now.strftime("%Y-%m-%d")
+    runs_today = counter.get(today_key, 0)
+    lines.append(f"Checks today: *{runs_today}*")
+    lines.append("")
+
+    # Retail SKU delivery estimates
+    lines.append("*Retail SKU Delivery:*")
+    for sku, label in CONFIG["skus"].items():
+        sf = STATE_DIR / f"delivery_{sku.replace('/', '_')}.json"
+        if sf.exists():
+            try:
+                data = json.loads(sf.read_text())
+                lines.append(f"  {label}: {data.get('estimate', '?')}")
+            except (json.JSONDecodeError, KeyError):
+                lines.append(f"  {label}: no data")
+        else:
+            lines.append(f"  {label}: no data")
+
+    lines.append("")
+
+    # CTO delivery estimates
+    lines.append("*CTO Delivery (64GB):*")
+    for config_id, cfg in CONFIG.get("cto_configs", {}).items():
+        sf = STATE_DIR / f"cto_{config_id}.json"
+        if sf.exists():
+            try:
+                data = json.loads(sf.read_text())
+                lines.append(f"  {cfg['label']}: {data.get('estimate', '?')}")
+            except (json.JSONDecodeError, KeyError):
+                lines.append(f"  {cfg['label']}: no data")
+        else:
+            lines.append(f"  {cfg['label']}: no data")
+
+    lines.append("")
+
+    # Pickup status
+    lines.append("*Pickup:* No availability (all stores)")
+
+    # Page change status
+    page_count = sum(1 for p in CONFIG["watch_pages"]
+                     if (STATE_DIR / f"page_{hashlib.md5(p['url'].encode()).hexdigest()}.txt").exists())
+    lines.append(f"*Pages monitored:* {page_count}/{len(CONFIG['watch_pages'])}")
+
+    return "\n".join(lines)
+
+
+def increment_run_counter():
+    """Track how many checks happen per day."""
+    counter_file = STATE_DIR / "run_counter.json"
+    counter = {}
+    if counter_file.exists():
+        try:
+            counter = json.loads(counter_file.read_text())
+        except (json.JSONDecodeError, KeyError):
+            pass
+    today_key = datetime.now(SGT).strftime("%Y-%m-%d")
+    counter[today_key] = counter.get(today_key, 0) + 1
+    # Keep only last 7 days
+    cutoff = (datetime.now(SGT) - timedelta(days=7)).strftime("%Y-%m-%d")
+    counter = {k: v for k, v in counter.items() if k >= cutoff}
+    counter_file.write_text(json.dumps(counter, indent=2))
+
+
+# ── Telegram Command Handler ─────────────────────────────────────────
+
+def check_telegram_commands():
+    """Poll for Telegram /health commands and respond."""
+    token = CONFIG["telegram_bot_token"]
+    chat_id = CONFIG["telegram_chat_id"]
+    if not token or not chat_id:
+        return
+
+    offset_file = STATE_DIR / "tg_update_offset.txt"
+    offset = 0
+    if offset_file.exists():
+        try:
+            offset = int(offset_file.read_text().strip())
+        except ValueError:
+            pass
+
+    url = f"https://api.telegram.org/bot{token}/getUpdates?offset={offset}&timeout=0"
+    raw = _curl_fetch(url, timeout=5)
+    if not raw:
+        return
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return
+
+    results = data.get("result", [])
+    for update in results:
+        update_id = update.get("update_id", 0)
+        msg = update.get("message", {})
+        text = msg.get("text", "")
+        msg_chat_id = str(msg.get("chat", {}).get("id", ""))
+
+        # Only respond to our authorized chat
+        if msg_chat_id != chat_id:
+            offset = update_id + 1
+            continue
+
+        if text.startswith("/health") or text.startswith("/status"):
+            log("  Telegram: /health command received")
+            report = build_health_report()
+            telegram_send(report)
+        elif text.startswith("/help"):
+            telegram_send(
+                "*Commands:*\n"
+                "/health — Current status and delivery estimates\n"
+                "/help — Show this message"
+            )
+
+        offset = update_id + 1
+
+    if results:
+        offset_file.write_text(str(offset))
+
+
+# ── Daily Summary ────────────────────────────────────────────────────
+
+def check_daily_summary():
+    """Send a daily summary at 9 AM SGT."""
+    now = datetime.now(SGT)
+    summary_file = STATE_DIR / "last_daily_summary.txt"
+
+    today_key = now.strftime("%Y-%m-%d")
+    if summary_file.exists() and summary_file.read_text().strip() == today_key:
+        return  # Already sent today
+
+    # Send at 9 AM SGT (hour 9). Since we run every 5 min, check window 9:00-9:09
+    if now.hour != 9 or now.minute >= 10:
+        return
+
+    log("  Sending daily summary")
+    report = build_health_report()
+    telegram_send(f"*Daily Summary*\n\n{report}")
+    summary_file.write_text(today_key)
+
+
 # ── Main ──────────────────────────────────────────────────────────────
 
 def run_check():
+    increment_run_counter()
+    check_telegram_commands()
     log("── Checking pickup availability ──")
     check_pickup()
     log("── Checking delivery estimates (retail SKUs) ──")
@@ -407,6 +566,7 @@ def run_check():
     check_cto_delivery()
     log("── Checking page changes ──")
     check_page_changes()
+    check_daily_summary()
     log("── Done ──")
 
 
@@ -414,12 +574,20 @@ def main():
     parser = argparse.ArgumentParser(description="Apple Store Stock Monitor (Singapore)")
     parser.add_argument("--loop", nargs="?", const=CONFIG["poll_interval"], type=int,
                         help="Poll continuously (optional: interval in seconds, default 120)")
+    parser.add_argument("--health", action="store_true",
+                        help="Send health report to Telegram and exit")
     args = parser.parse_args()
 
     tg_status = "configured" if CONFIG["telegram_bot_token"] else "not set (use APPLE_MONITOR_TG_TOKEN)"
     log("Apple Stock Monitor — Singapore")
     log(f"  Monitoring {len(CONFIG['skus'])} SKUs + {len(CONFIG['watch_pages'])} pages")
     log(f"  Telegram: {tg_status}")
+
+    if args.health:
+        report = build_health_report()
+        telegram_send(report)
+        print(report.replace("*", "").replace("_", ""))
+        return
 
     if args.loop:
         log(f"  Polling every {args.loop}s (Ctrl+C to stop)")
