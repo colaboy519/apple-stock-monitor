@@ -36,15 +36,10 @@ CONFIG = {
     "telegram_bot_token": os.environ.get("APPLE_MONITOR_TG_TOKEN", ""),
     "telegram_chat_id": os.environ.get("APPLE_MONITOR_TG_CHAT", ""),
 
-    # SKUs to monitor — 64GB+ models only (Mac Mini, Mac Studio, MacBook Pro)
+    # SKUs to monitor — 64GB+ RAM models only
     "skus": {
-        # ── Mac Studio (2025) — 64GB is a standard retail SKU ──
         "MHQH4ZP/A": "Mac Studio M4 Max 64GB/1TB",
-        # ── Mac Studio M3 Ultra 96GB ──
         "MU973ZP/A": "Mac Studio M3 Ultra 96GB",
-        # ── MacBook Pro 16" M5 Max 48GB (closest retail to 64GB) ──
-        "MGE94ZP/A": "MBP 16\" M5 Max 48GB/2TB Silver",
-        "MGEE4ZP/A": "MBP 16\" M5 Max 48GB/2TB Black",
     },
 
     # CTO configs to monitor delivery estimates (no in-store pickup)
@@ -80,10 +75,8 @@ CONFIG = {
     "watch_pages": [
         {"url": "https://www.apple.com/sg/shop/buy-mac/mac-mini", "label": "Mac Mini Buy"},
         {"url": "https://www.apple.com/sg/shop/buy-mac/mac-studio", "label": "Mac Studio Buy"},
-        {"url": "https://www.apple.com/sg/shop/buy-mac/macbook-pro", "label": "MacBook Pro Buy"},
         {"url": "https://www.apple.com/sg/mac-mini/", "label": "Mac Mini Product"},
         {"url": "https://www.apple.com/sg/mac-studio/", "label": "Mac Studio Product"},
-        {"url": "https://www.apple.com/sg/macbook-pro/", "label": "MacBook Pro Product"},
     ],
 
     # Only notify if delivery is within this many days
