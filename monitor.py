@@ -125,7 +125,11 @@ def _curl_fetch(url: str, timeout: int = 15, post_data: Optional[str] = None) ->
     return result.stdout
 
 
+import sys
+
 def macos_notify(title: str, message: str):
+    if sys.platform != "darwin":
+        return
     subprocess.run([
         "osascript", "-e",
         f'display notification "{message}" with title "{title}" sound name "Glass"'
